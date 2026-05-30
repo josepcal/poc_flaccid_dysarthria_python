@@ -182,16 +182,78 @@ def analyze_sustained_vowel(path, f0min=75, f0max=400):
 
 
 # ----------------------------------------------------------------------------
-# Shared onset detection + burst spectral features (used by AMR and SMR tasks)
+# Shared syllable detection + burst spectral features (used by AMR and SMR tasks)
 # ----------------------------------------------------------------------------
-def _detect_onsets(y, sr, hop=256, sensitivity=0.6):
-    """Return (onset_times, peak_frame_indices, rms_envelope, hop)."""
-    env = librosa.onset.onset_strength(y=y, sr=sr, hop_length=hop)
-    times = librosa.times_like(env, sr=sr, hop_length=hop)
-    peaks = librosa.util.peak_pick(env, pre_max=3, post_max=3, pre_avg=5,
-                                   post_avg=5, delta=np.median(env) * sensitivity, wait=4)
+MAX_PLAUSIBLE_RATE = 8.0   # syll/s; faster than this is detection error, not speech
+
+
+def _detect_onsets(y, sr, hop=256, silence_db=25.0, min_dip_db=2.0,
+                   refractory_s=0.12, require_voiced=True):
+    """Detect syllable NUCLEI (de Jong & Wempe style) instead of generic audio
+    onsets. A nucleus is an intensity peak that is (a) above a silence floor,
+    (b) separated from the previous nucleus by a real intensity dip, (c) at least
+    `refractory_s` apart (so >~8 syll/s is impossible), and (d) voiced. This is far
+    more robust on dysarthric speech than music onset detection.
+
+    Returns (nucleus_times, peak_frame_indices, rms_envelope, hop) -- same shape as
+    before, so downstream code is unchanged.
+    """
     rms = librosa.feature.rms(y=y, hop_length=hop)[0]
+    db = 20.0 * np.log10(rms + 1e-10)
+    times = librosa.frames_to_time(np.arange(len(rms)), sr=sr, hop_length=hop)
+
+    # light smoothing (~30 ms) to suppress micro-jitter in the envelope
+    w = max(1, int(0.03 * sr / hop))
+    if w > 1:
+        db = np.convolve(db, np.ones(w) / w, mode="same")
+
+    floor = db.max() - silence_db
+
+    # candidate local maxima above the silence floor
+    cand = [i for i in range(1, len(db) - 1)
+            if db[i] >= db[i - 1] and db[i] > db[i + 1] and db[i] > floor]
+
+    # accept a peak only if a genuine dip AND the refractory gap separate it from
+    # the last accepted peak; otherwise it's the same syllable -> keep the louder.
+    accepted = []
+    for i in cand:
+        if not accepted:
+            accepted.append(i)
+            continue
+        prev = accepted[-1]
+        dip = min(db[prev], db[i]) - db[prev:i + 1].min()
+        far_enough = (times[i] - times[prev]) >= refractory_s
+        if dip >= min_dip_db and far_enough:
+            accepted.append(i)
+        elif db[i] > db[prev]:
+            accepted[-1] = i
+    peaks = np.array(accepted, dtype=int)
+
+    # voicing gate: keep only nuclei that sit on voiced frames (vowels), which
+    # rejects consonant bursts, clicks and breath noise picked up as peaks.
+    if require_voiced and peaks.size:
+        try:
+            snd = parselmouth.Sound(np.asarray(y, dtype="float64"),
+                                    sampling_frequency=sr)
+            pitch = snd.to_pitch(time_step=hop / sr)
+            f0 = pitch.selected_array["frequency"]
+            ptimes = pitch.xs()
+            kept = [i for i in peaks
+                    if f0[min(len(f0) - 1, int(np.argmin(np.abs(ptimes - times[i]))))] > 0]
+            if kept:
+                peaks = np.array(kept, dtype=int)
+        except Exception:
+            pass
+
     return times[peaks], peaks, rms, hop
+
+
+def _rate_warning(label, rate):
+    """Flag physiologically impossible DDK rates (a detection-error signal)."""
+    if rate is not None and not np.isnan(rate) and rate > MAX_PLAUSIBLE_RATE:
+        print(f"[warn] {label} rate {rate:.1f} syll/s exceeds {MAX_PLAUSIBLE_RATE} "
+              f"syll/s -- likely over-detection; treat DDK metrics with caution.")
+
 
 
 def _burst_features(y, sr, onset_time, win_ms=35):
@@ -263,6 +325,7 @@ def analyze_pataka(path):
     mean_iv = float(np.mean(intervals))
     result["smr_rate_syll_sec"] = round(1.0 / mean_iv, 2) if mean_iv > 0 else float("nan")
     result["smr_cv_interval"] = round(float(np.std(intervals) / mean_iv), 3) if mean_iv > 0 else float("nan")
+    _rate_warning("SMR /pataka/", result["smr_rate_syll_sec"])
 
     # classify each onset by place
     feats = [_burst_features(y, sr, t) for t in onsets]
@@ -320,6 +383,7 @@ def analyze_ddk(path, syllable="pa"):
         cv = float(np.std(intervals) / mean_iv) if mean_iv > 0 else float("nan")
         result["ddk_rate_syll_sec"] = round(1.0 / mean_iv, 2)
         result["ddk_cv_interval"] = round(cv, 3)
+        _rate_warning("DDK /pa/", result["ddk_rate_syll_sec"])
     else:
         result["ddk_rate_syll_sec"] = float("nan")
         result["ddk_cv_interval"] = float("nan")
