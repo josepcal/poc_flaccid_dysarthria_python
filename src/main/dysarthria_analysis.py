@@ -66,8 +66,19 @@ def _score(value, good, poor):
 # Low-level helpers
 # ----------------------------------------------------------------------------
 def load_sound(path, target_sr=44100):
-    snd = parselmouth.Sound(path)
-    return snd
+    try:
+        return parselmouth.Sound(path)          # fast path: Praat reads it directly
+    except parselmouth.PraatError:
+        try:
+            import soundfile as sf
+            y, sr = sf.read(path, always_2d=False)   # handles float/odd WAVs
+        except Exception:
+            import librosa                            # last resort: needs ffmpeg for AAC
+            y, sr = librosa.load(path, sr=None, mono=True)
+        y = np.asarray(y, dtype="float64")
+        if y.ndim > 1:                          # stereo -> mono
+            y = y.mean(axis=1)
+        return parselmouth.Sound(y, sampling_frequency=sr)
 
 
 def _voiced_intensity_std(snd, pitch=None):
