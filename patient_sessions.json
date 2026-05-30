@@ -340,5 +340,55 @@
       "n_breath_groups": 19
     },
     "note": "first try from Jose"
+  },
+  {
+    "date": "2026-05-30",
+    "domains": {
+      "respiratory_support": 10.0,
+      "voice_stability": 48.7,
+      "labial_closure": 59.0,
+      "lingual_closure": 75.2,
+      "ddk_regular": 27.3,
+      "intelligibility": null
+    },
+    "raw": {
+      "smr_n_syllables": 34,
+      "smr_rate_syll_sec": 3.67,
+      "smr_cv_interval": 0.808,
+      "per_place": {
+        "pa": {
+          "n": 28,
+          "mod_depth": 0.683,
+          "centroid_hz": 1303.7,
+          "cv_interval": 0.713
+        },
+        "ka": {
+          "n": 5,
+          "mod_depth": 0.557,
+          "centroid_hz": 1791.4,
+          "cv_interval": 0.746
+        },
+        "ta": {
+          "n": 1,
+          "mod_depth": 0.894,
+          "centroid_hz": 2702.1,
+          "cv_interval": null
+        }
+      },
+      "labial_mod_depth": 0.645,
+      "lingual_mod_depth": 0.726,
+      "ddk_n_syllables": 49,
+      "ddk_rate_syll_sec": 4.87,
+      "ddk_cv_interval": 0.797,
+      "phonation_duration_sec": 7.8,
+      "jitter_local_pct": 1.146,
+      "shimmer_local_pct": 6.862,
+      "hnr_db": 13.36,
+      "volume_std_db": 8.06,
+      "mean_phrase_sec": 0.53,
+      "max_phrase_sec": 1.7,
+      "n_breath_groups": 19
+    },
+    "note": "first try from Jose"
   }
 ]

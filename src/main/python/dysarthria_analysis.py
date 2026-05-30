@@ -23,7 +23,10 @@ they do not replace, the speech-language pathologist's perceptual judgment.
 from __future__ import annotations
 import json
 import os
+import shutil
 import statistics
+import subprocess
+import tempfile
 from dataclasses import dataclass, asdict, field
 from datetime import datetime
 
@@ -73,9 +76,60 @@ def _score(value, good, poor):
 # ----------------------------------------------------------------------------
 # Low-level helpers
 # ----------------------------------------------------------------------------
+_FFMPEG = shutil.which("ffmpeg")
+
+
+def ensure_pcm_wav(path, sr=44100, cache_dir=None, force=False):
+    """Re-encode any audio file (m4a, AAC, float/odd WAV, ...) to mono 16-bit PCM
+    WAV via ffmpeg, so Praat/parselmouth can read it reliably. Returns the path to
+    the converted file. Results are cached, so repeat runs don't re-encode.
+
+    If ffmpeg is not installed, prints a warning and returns the original path
+    unchanged (the caller's loader fallback may still cope with plain WAVs).
+    """
+    if path is None:
+        return None
+    if _FFMPEG is None:
+        print("[warn] ffmpeg not found on PATH; using original file as-is. "
+              "Install it for robust decoding:  sudo apt install ffmpeg")
+        return path
+
+    cache_dir = cache_dir or os.path.join(tempfile.gettempdir(), "dysarthria_wav")
+    os.makedirs(cache_dir, exist_ok=True)
+    base = os.path.splitext(os.path.basename(path))[0]
+    out = os.path.join(cache_dir, f"{base}__{sr}hz_mono.wav")
+
+    # skip if a fresh cached copy already exists
+    if (not force and os.path.exists(out)
+            and os.path.getmtime(out) >= os.path.getmtime(path)):
+        return out
+
+    try:
+        subprocess.run(
+            [_FFMPEG, "-y", "-i", path, "-ac", "1", "-ar", str(sr),
+             "-c:a", "pcm_s16le", out],
+            check=True, capture_output=True, text=True)
+    except subprocess.CalledProcessError as e:
+        tail = (e.stderr or "").strip().splitlines()
+        print(f"[warn] ffmpeg could not convert {path}: "
+              f"{tail[-1] if tail else 'unknown error'}")
+        return path
+    return out
+
+
 def load_sound(path, target_sr=44100):
-    snd = parselmouth.Sound(path)
-    return snd
+    try:
+        return parselmouth.Sound(path)          # fast path: Praat reads it directly
+    except parselmouth.PraatError:
+        try:
+            import soundfile as sf
+            y, sr = sf.read(path, always_2d=False)   # handles float/odd WAVs
+        except Exception:
+            y, sr = librosa.load(path, sr=None, mono=True)  # last resort (uses ffmpeg)
+        y = np.asarray(y, dtype="float64")
+        if y.ndim > 1:                          # stereo -> mono
+            y = y.mean(axis=1)
+        return parselmouth.Sound(y, sampling_frequency=sr)
 
 
 def _voiced_intensity_std(snd, pitch=None):
@@ -608,8 +662,18 @@ def _clean_nan(obj):
 
 def full_session(vowel_path=None, ddk_path=None, reading_path=None,
                  target_text=None, transcript=None, ddk_syllable="pa",
-                 pataka_path=None):
-    """Run every available task and return (domains, raw_metrics)."""
+                 pataka_path=None, reformat=True, sr=44100):
+    """Run every available task and return (domains, raw_metrics).
+
+    If reformat is True (default), each input is first normalised to mono 16-bit
+    PCM WAV with ffmpeg so phone recordings (m4a/AAC/odd WAV) load reliably.
+    """
+    if reformat:
+        vowel_path   = ensure_pcm_wav(vowel_path, sr)
+        ddk_path     = ensure_pcm_wav(ddk_path, sr)
+        reading_path = ensure_pcm_wav(reading_path, sr)
+        pataka_path  = ensure_pcm_wav(pataka_path, sr)
+
     v = analyze_sustained_vowel(vowel_path) if vowel_path else None
     d = analyze_ddk(ddk_path, syllable=ddk_syllable) if ddk_path else None
     r = analyze_reading(reading_path, target_text, transcript) if reading_path else None
@@ -630,10 +694,14 @@ if __name__ == "__main__":
                    help="render the longitudinal domain chart after logging")
     p.add_argument("--plot-metrics", metavar="OUT.png", dest="plot_metrics",
                    help="render the per-metric small-multiples chart with norm bands")
+    p.add_argument("--reformat", action=argparse.BooleanOptionalAction, default=True,
+                   help="auto-convert inputs to mono 16-bit PCM WAV via ffmpeg (default: on)")
+    p.add_argument("--sr", type=int, default=44100, help="target sample rate for reformatting")
     a = p.parse_args()
 
     domains, raw = full_session(a.vowel, a.ddk, a.reading,
-                                a.target, a.transcript, a.syllable, a.pataka)
+                                a.target, a.transcript, a.syllable, a.pataka,
+                                reformat=a.reformat, sr=a.sr)
     print("RAW METRICS:");      print(json.dumps(_clean_nan(raw), indent=2))
     print("\nDOMAIN SCORES (0-100, higher = better):")
     print(json.dumps(domains, indent=2))
